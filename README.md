@@ -60,11 +60,19 @@ PDF论文
   │  · diverse_top_k：保证三层都有代表进入最终结果
   │
   ▼
-[cli.py] Function Calling Agent
-     · DeepSeek API + tool use
-     · 自动决定是否需要检索、检索什么关键词
-     · 支持单轮和多轮检索
-     · 基于检索结果生成有引用来源的回答
+[agent.py] Function Calling Agent 核心
+  │  · TOOLS_SCHEMA / SYSTEM_PROMPT 定义
+  │  · execute_tool() 工具分发
+  │  · run_agent_turn(messages, ...) → (answer, updated_messages)
+  │
+  ├──▶ [cli.py] 命令行交互
+  │        · 多轮对话（messages 跨轮次保留）
+  │        · 输入 'new' 重置对话
+  │
+  └──▶ [app.py] FastAPI Web 服务
+           · POST /chat     多轮对话（session 隔离）
+           · GET  /papers   列出已加载论文
+           · DELETE /session/{id} 清除会话
 ```
 
 ## 快速开始
@@ -95,8 +103,22 @@ cp .env.example .env
 
 ### 5. 运行
 
+**命令行模式：**
 ```bash
 python cli.py
+```
+
+**Web API 模式：**
+```bash
+python -m uvicorn app:app --reload
+# 或
+python app.py
+```
+启动后访问 `http://127.0.0.1:8000/docs` 查看接口文档。
+
+**Python 客户端：**
+```bash
+python client.py
 ```
 
 首次运行会下载 Embedding 和 Reranker 模型（约 1.3 GB），之后会自动缓存。
@@ -111,13 +133,19 @@ python cli.py
 
 ```
 paper_assistant/
-├── cli.py                 # 主程序入口（Agent + 交互循环）
+├── cli.py                 # 命令行交互入口
+├── app.py                 # FastAPI Web 服务入口
+├── client.py              # Python HTTP 客户端
 ├── src/
+│   ├── agent.py           # Agent 核心（工具定义 + run_agent_turn）
 │   ├── paper_parser.py    # PDF 解析与结构识别
 │   ├── chunker.py         # 层次化 chunk 构建
-│   └── retriever.py       # Embedding + Reranker 检索
+│   ├── retriever.py       # Embedding + Reranker 检索
+│   ├── tools.py           # 工具函数实现
+│   └── load_all_paper.py  # 批量加载 + 磁盘缓存
 ├── data/
-│   └── papers/            # 放置 PDF 论文
+│   ├── papers/            # 放置 PDF 论文
+│   └── index/             # 向量索引缓存（自动生成）
 ├── requirements.txt
 ├── .env.example           # API Key 配置模板
 └── .gitignore
@@ -151,10 +179,10 @@ diverse_top_k 确保不同层级的最佳 chunk 都进入最终结果，让 LLM 
 
 ## 已知局限
 
-- 目前仅支持单篇论文（多论文支持在计划中）
 - PDF 表格和数学公式的提取质量有限
 - 章节识别基于正则匹配，对非标准格式论文可能失败
 - Embedding 模型（all-MiniLM-L6-v2）为英文模型，对中文论文效果较差
+- Web API 的 SESSION_STORE 为内存存储，重启服务后会话历史丢失
 
 ## 技术栈
 
@@ -162,4 +190,5 @@ diverse_top_k 确保不同层级的最佳 chunk 都进入最终结果，让 LLM 
 - **Embedding**: all-MiniLM-L6-v2（sentence-transformers）
 - **Reranker**: BAAI/bge-reranker-base（Cross-Encoder）
 - **PDF 解析**: PyMuPDF
+- **Web 框架**: FastAPI + uvicorn
 - **Agent**: 原生 Function Calling（无框架依赖）
