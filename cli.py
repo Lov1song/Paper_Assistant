@@ -6,7 +6,7 @@ from openai import OpenAI
 from src.paper_parser import parse_paper
 from src.chunker import build_hierarchical_chunks
 from src.retriever import build_index, search_with_rerank
-
+from src.load_all_paper import load_all_papers
 load_dotenv()
 
 CLIENT = OpenAI(
@@ -43,13 +43,13 @@ TOOLS_SCHEMA = [
         "type": "function",
         "function": {
             "name": "search_paper",
-            "description": "在已加载的论文中检索与问题相关的内容。返回论文中最相关的段落，标注来源章节。当用户提出任何关于论文内容的问题时使用此工具。",
+            "description": "在所有已加载的论文中检索与问题相关的内容。返回最相关的段落，标注来自哪篇论文和哪个章节。当用户提出任何关于论文内容的问题时使用此工具。",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "检索查询词，用英文，尽量具体。例如 'sparse dictionary method' 或 'evaluation dataset and metrics'"
+                        "description": "检索查询词，用英文，尽量具体"
                     }
                 },
                 "required": ["query"]
@@ -59,15 +59,15 @@ TOOLS_SCHEMA = [
 ]
 
 # ====== System Prompt ======
-SYSTEM_PROMPT = """你是一个学术论文阅读助手。你的任务是帮助用户理解和分析已加载的论文。
+SYSTEM_PROMPT = """你是一个学术论文阅读助手。你可以帮助用户理解和分析已加载的多篇论文。
 
-你可以使用 search_paper 工具在论文中检索相关内容。检索结果会标注来源章节和内容类型。
+你可以使用 search_paper 工具在所有已加载的论文中检索相关内容。检索结果会标注来自哪篇论文、哪个章节。
 
 回答问题时请遵循以下原则：
 1. 基于论文内容回答，不要编造论文中没有的信息
-2. 在回答中引用来源章节，例如"根据论文的 Section 3..."
-3. 如果检索结果不足以回答问题，诚实地说"论文中没有明确提到这一点"
-4. 对于概括性问题，优先参考 Abstract 和 Introduction 的内容进行总结
+2. 在回答中明确指出信息来自哪篇论文的哪个章节
+3. 如果多篇论文涉及同一话题，对比它们的异同
+4. 如果检索结果不足以回答问题，诚实地说"已加载的论文中没有明确提到这一点"
 5. 用中文回答用户的问题
 """
 
@@ -127,28 +127,29 @@ def run_agent(user_question: str, max_steps: int = 5) -> str:
 
 # ====== 主程序 ======
 if __name__ == "__main__":
-    # 1. 加载论文
-    pdf_path = "data/papers/1.2016-Arad_and_Ben_Shahar-Sparse_Recovery_of_Hyperspectral_Signal_from_Natural_RGB_Images.pdf"
+    print("=" * 50)
+    print("📄 Paper Assistant - 论文智能问答助手")
+    print("=" * 50)
     
-    print(f"正在加载论文: {pdf_path}")
-    paper = parse_paper(pdf_path)
+    # 加载所有论文
+    CHUNKS, VECTORS = load_all_papers("data/papers")
     
-    print("正在构建索引...")
-    CHUNKS = build_hierarchical_chunks(paper, paper_id="arad_2016")
-    VECTORS = build_index(CHUNKS)
+    if not CHUNKS:
+        print("没有找到论文，请将 PDF 文件放入 data/papers/ 目录")
+        exit(1)
     
-    print(f"\n加载完成！")
-    print(f"  论文: {paper['metadata']['filename']}")
-    print(f"  页数: {paper['metadata']['num_pages']}")
-    print(f"  章节: {len(paper['sections'])} 个")
-    print(f"  索引: {len(CHUNKS)} 个 chunks")
+    # 统计论文信息
+    paper_ids = set(c["paper_id"] for c in CHUNKS)
+    print(f"\n已加载 {len(paper_ids)} 篇论文，共 {len(CHUNKS)} 个 chunks")
+    print("\n已加载的论文：")
+    for pid in sorted(paper_ids):
+        count = sum(1 for c in CHUNKS if c["paper_id"] == pid)
+        print(f"  · {pid} ({count} chunks)")
+    
     print()
-    print("=" * 50)
-    print("论文助手已就绪，你可以开始提问了")
-    print("输入 'exit' 退出")
+    print("你可以开始提问了（输入 'exit' 退出）")
     print("=" * 50)
     
-    # 2. 交互循环
     while True:
         user_input = input("\n你: ").strip()
         if not user_input:
@@ -156,5 +157,4 @@ if __name__ == "__main__":
         if user_input.lower() in ['exit', 'quit', 'q']:
             print("再见！")
             break
-        
         run_agent(user_input)

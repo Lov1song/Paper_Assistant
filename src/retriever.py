@@ -69,41 +69,64 @@ def diverse_top_k(candidates, scores, final_k=3):
     
     return chosen
 
-def search_with_rerank(query: str, chunks: list[dict], vectors: np.ndarray,
-                        recall_k: int = 20, final_k: int = 5) -> list[tuple[dict, float]]:
+def search_with_rerank(query: str, chunks: list[dict], vectors,
+                        recall_k: int = 40, final_k: int = 5) -> list[tuple[dict, float]]:
     """
-    两阶段检索 + 分层召回
-    确保 document、section、paragraph 三层都有代表进入 rerank 阶段
+    两阶段检索：分层配额召回 + reranker 精排 + 多样性重排
     """
     query_vector = embedder.encode([query], normalize_embeddings=True).astype(np.float32)
     scores = np.dot(query_vector, vectors.T).squeeze()
     
-    # === 新增：分层召回 ===
-    # 按 level 分组索引
-    doc_indices = [i for i, c in enumerate(chunks) if c["level"] == "document"]
-    section_indices = [i for i, c in enumerate(chunks) if c["level"] == "section"]
-    para_indices = [i for i, c in enumerate(chunks) if c["level"] == "paragraph"]
+    # ===== 分层配额召回 =====
+    # 按 level 分组
+    level_groups = {
+        "document": [],
+        "section": [],
+        "paragraph": [],
+    }
+    for i, c in enumerate(chunks):
+        level = c["level"]
+        if level in level_groups:
+            level_groups[level].append((i, float(scores[i])))
     
-    # 分别取每层的 top
-    def top_from_group(group_indices, k):
-        """从一个 level 的索引里取相似度 top-k"""
-        if not group_indices:
-            return []
-        group_scores = [(i, scores[i]) for i in group_indices]
-        group_scores.sort(key=lambda x: x[1], reverse=True)
-        return [i for i, _ in group_scores[:k]]
+    # 每组按分数降序排
+    for level in level_groups:
+        level_groups[level].sort(key=lambda x: x[1], reverse=True)
     
-    # 分配配额：document 全取，section 全取，paragraph 取剩余名额
-    doc_top = top_from_group(doc_indices, k=len(doc_indices))  # 全部
-    section_top = top_from_group(section_indices, k=len(section_indices))  # 全部
-    para_quota = recall_k - len(doc_top) - len(section_top)
-    para_top = top_from_group(para_indices, k=max(para_quota, 1))
+    # 分配配额：20% / 30% / 50%
+    quotas = {
+        "document": max(1, int(recall_k * 0.2)),
+        "section": max(1, int(recall_k * 0.3)),
+        "paragraph": max(1, int(recall_k * 0.5)),
+    }
     
-    recall_ids = doc_top + section_top + para_top
+    # 第一轮：每层按配额取（如果不够就有多少取多少）
+    recall_ids = []
+    leftover = 0   # 某层没用完的配额
+    
+    for level in ["document", "section", "paragraph"]:
+        available = level_groups[level]
+        quota = quotas[level] + leftover
+        take = min(quota, len(available))
+        recall_ids.extend([idx for idx, _ in available[:take]])
+        leftover = quota - take   # 没用完的名额留给下一层
+    
+    # 如果还有剩余名额（三层都不够），从全局 top 补
+    if leftover > 0:
+        all_sorted = sorted(enumerate(scores), key=lambda x: x[1], reverse=True)
+        existing = set(recall_ids)
+        for idx, _ in all_sorted:
+            if idx not in existing:
+                recall_ids.append(idx)
+                leftover -= 1
+                if leftover <= 0:
+                    break
+    
     candidates = [chunks[i] for i in recall_ids]
-    print(f"DEBUG 召回 {len(candidates)} 个候选, level 分布: {dict(Counter(c['level'] for c in candidates))}")
-    # === reranker 精排（不变）===
+    
+    # ===== Reranker 精排 =====
     pairs = [(query, c["text"]) for c in candidates]
     rerank_scores = reranker.predict(pairs)
-
+    
+    # ===== 多样性重排 =====
     return diverse_top_k(candidates, rerank_scores, final_k=final_k)
